@@ -7,6 +7,7 @@ import argparse
 import configparser
 import urllib.request
 import ssl
+import socket
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -32,8 +33,6 @@ def load_config(config_path):
             "proxy_protocol": "http",
             "listen_ip": "0.0.0.0",
             "listen_port": "8080",
-            "ssl_cert_file": "/etc/jellyfin_vdr_proxy/cert.pem",
-            "ssl_key_file": "/etc/jellyfin_vdr_proxy/privkey.pem"
         }
         try:
             with open(config_path, "w", encoding="utf-8") as f:
@@ -55,6 +54,9 @@ VDR_PROTOCOL = config.get("VDR", "vdr_protocol", fallback="http").strip().lower(
 VDR_IP = config.get("VDR", "vdr_ip")
 STREAMDEV_PORT = config.getint("VDR", "streamdev_port")
 EPG_DATA_PATH = config.get("VDR", "epg_data_path")
+EPG_MODE = config.get("VDR", "epg_mode", fallback="file").strip().lower()
+SVDRP_PORT = config.getint("VDR", "svdrp_port", fallback=6419)
+SVDRP_TIMEOUT = config.getint("VDR", "svdrp_timeout", fallback=30)
 
 PROXY_PROTOCOL = config.get("PROXY", "proxy_protocol", fallback="http").strip().lower()
 LISTEN_IP = config.get("PROXY", "listen_ip", fallback="0.0.0.0")
@@ -99,13 +101,6 @@ def fetch_streamdev_channels():
     except Exception as e:
         print(f"[!] Error fetching Streamdev M3U for EPG validation: {e}", file=sys.stderr)
     return channels
-
-import socket
-
-# Add these new config lookups below your existing configuration initializations:
-EPG_MODE = config.get("VDR", "epg_mode", fallback="file").strip().lower()
-SVDRP_PORT = config.getint("VDR", "svdrp_port", fallback=6419)
-SVDRP_TIMEOUT = config.getint("VDR", "svdrp_timeout", fallback=30)
 
 def fetch_epg_via_svdrp():
     """Connects to the VDR via SVDRP and fetches the complete EPG data stream."""
@@ -231,69 +226,6 @@ def parse_epg_data():
                 xml.append('  </programme>')
                 inside_event = False
                 
-    xml.append('</tv>')
-    return "\n".join(xml)
-
-def old_parse_epg_data():
-    channel_map = fetch_streamdev_channels()
-    if os.path.exists(EPG_DATA_PATH):
-        with open(EPG_DATA_PATH, "r", encoding="utf-8", errors="ignore") as f:
-            for line in f:
-                line = line.strip()
-                if line.startswith("C "):
-                    parts = line.split(" ", 2)
-                    if len(parts) >= 2:
-                        raw_id = parts[1].strip()
-                        if raw_id not in channel_map and len(parts) > 2:
-                            channel_map[raw_id] = parts[2].strip()
-
-    xml = ['<?xml version="1.0" encoding="utf-8" ?>']
-    xml.append('<tv generator-info-name="VDR-EPG-Converter">')
-    for raw_id, ch_name in channel_map.items():
-        clean_id = sanitize_id(raw_id)
-        xml.append(f'  <channel id="{clean_id}">')
-        xml.append(f'    <display-name>{clean_xml_string(ch_name)}</display-name>')
-        xml.append('  </channel>')
-        
-    if os.path.exists(EPG_DATA_PATH):
-        inside_event = False
-        current_channel = None
-        with open(EPG_DATA_PATH, "r", encoding="utf-8", errors="ignore") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                parts = line.split(" ", 1)
-                tag = parts[0]
-                content = parts[1].strip() if len(parts) > 1 else ""
-                if tag == "C":
-                    c_parts = content.split(" ", 1)
-                    current_channel = c_parts[0].strip()
-                elif tag == "E" and current_channel:
-                    inside_event = True
-                    e_parts = content.split(" ")
-                    if len(e_parts) >= 3:
-                        try:
-                            start_ts = int(e_parts[1])
-                            duration = int(e_parts[2])
-                            end_ts = start_ts + duration
-
-                            start_str = datetime.fromtimestamp(start_ts).strftime('%Y%m%d%H%M%S +0100')
-                            end_str = datetime.fromtimestamp(end_ts).strftime('%Y%m%d%H%M%S +0100')
-                            
-                            clean_ch_id = sanitize_id(current_channel)
-                            xml.append(f'  <programme start="{start_str}" stop="{end_str}" channel="{clean_ch_id}">')
-                        except (ValueError, IndexError):
-                            inside_event = False
-                            continue
-                elif tag == "T" and inside_event:
-                    xml.append(f'    <title lang="de">{clean_xml_string(content)}</title>')
-                elif tag == "D" and inside_event:
-                    xml.append(f'    <desc lang="de">{clean_xml_string(content)}</desc>')
-                elif tag == "e":
-                    if inside_event:
-                        xml.append('  </programme>')
-                        inside_event = False
     xml.append('</tv>')
     return "\n".join(xml)
 
