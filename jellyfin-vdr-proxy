@@ -1,0 +1,380 @@
+#!/usr/bin/env python3
+import os
+import re
+import html
+import sys
+import argparse
+import configparser
+import urllib.request
+import ssl
+from datetime import datetime
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+DEFAULT_CONFIG_PATH = "/etc/jellyfin-vdr-proxy/config.ini"
+
+def load_config(config_path):
+    config = configparser.ConfigParser()
+    if not os.path.exists(config_path):
+        config_dir = os.path.dirname(config_path)
+        if config_dir and not os.path.exists(config_dir):
+            try:
+                os.makedirs(config_dir, exist_ok=True)
+            except Exception as e:
+                print(f"[!] Error creating directory {config_dir}: {e}", file=sys.stderr)
+                sys.exit(1)
+        config["VDR"] = {
+            "vdr_protocol": "http",
+            "vdr_ip": "127.0.0.1",
+            "streamdev_port": "3000",
+            "epg_data_path": "/var/lib/vdr/epg.data"
+        }
+        config["PROXY"] = {
+            "proxy_protocol": "http",
+            "listen_ip": "0.0.0.0",
+            "listen_port": "8080",
+            "ssl_cert_file": "/etc/jellyfin_vdr_proxy/cert.pem",
+            "ssl_key_file": "/etc/jellyfin_vdr_proxy/privkey.pem"
+        }
+        try:
+            with open(config_path, "w", encoding="utf-8") as f:
+                config.write(f)
+            print(f"[*] Default configuration created at '{config_path}'. Please verify the values!")
+        except Exception as e:
+            print(f"[!] Error writing config file to {config_path}: {e}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        config.read(config_path, encoding="utf-8")
+    return config
+
+parser = argparse.ArgumentParser(description="Jellyfin VDR Streamdev & EPG Proxy Converter")
+parser.add_argument("--config", default=DEFAULT_CONFIG_PATH, help=f"Path to the configuration file (default: {DEFAULT_CONFIG_PATH})")
+args = parser.parse_args()
+
+config = load_config(args.config)
+VDR_PROTOCOL = config.get("VDR", "vdr_protocol", fallback="http").strip().lower().replace("://", "")
+VDR_IP = config.get("VDR", "vdr_ip")
+STREAMDEV_PORT = config.getint("VDR", "streamdev_port")
+EPG_DATA_PATH = config.get("VDR", "epg_data_path")
+
+PROXY_PROTOCOL = config.get("PROXY", "proxy_protocol", fallback="http").strip().lower()
+LISTEN_IP = config.get("PROXY", "listen_ip", fallback="0.0.0.0")
+LISTEN_PORT = config.getint("PROXY", "listen_port")
+SSL_CERT_FILE = config.get("PROXY", "ssl_cert_file", fallback="")
+SSL_KEY_FILE = config.get("PROXY", "ssl_key_file", fallback="")
+
+VDR_BASE_URL = f"{VDR_PROTOCOL}://{VDR_IP}:{STREAMDEV_PORT}"
+
+def sanitize_id(vdr_id):
+    clean = re.sub(r'[^a-zA-Z0-9]', '_', vdr_id)
+    clean = re.sub(r'_+', '_', clean).strip('_')
+    return f"vdr_{clean}"
+
+def clean_xml_string(text):
+    """Removes invalid ASCII control characters and escapes HTML tags."""
+    if not text:
+        return ""
+    # 9 = Tab, 10 = Linefeed, 13 = Carriage Return, >= 32 = Regular characters
+    cleaned = "".join(ch for ch in text if ord(ch) >= 32 or ord(ch) in (9, 10, 13))
+    return html.escape(cleaned)
+
+def fetch_streamdev_channels():
+    channels = {}
+    try:
+        vdr_url = f"{VDR_BASE_URL}/channels.m3u"
+        req = urllib.request.Request(vdr_url, headers={'User-Agent': 'VDR-Jellyfin-Proxy'})
+        with urllib.request.urlopen(req, timeout=5) as response:
+            m3u_content = response.read().decode('utf-8', errors='ignore')
+        current_name = "Unknown Channel"
+        for line in m3u_content.splitlines():
+            line = line.strip()
+            if line.startswith("#EXTINF"):
+                parts = line.split(",", 1)
+                if len(parts) == 2:
+                    current_name = parts[1].strip()
+            elif line.startswith("http"):
+                match = re.search(r'/([^/]+)$', line)
+                if match:
+                    raw_id = match.group(1)
+                    channels[raw_id] = current_name
+    except Exception as e:
+        print(f"[!] Error fetching Streamdev M3U for EPG validation: {e}", file=sys.stderr)
+    return channels
+
+import socket
+
+# Add these new config lookups below your existing configuration initializations:
+EPG_MODE = config.get("VDR", "epg_mode", fallback="file").strip().lower()
+SVDRP_PORT = config.getint("VDR", "svdrp_port", fallback=6419)
+SVDRP_TIMEOUT = config.getint("VDR", "svdrp_timeout", fallback=30)
+
+def fetch_epg_via_svdrp():
+    """Connects to the VDR via SVDRP and fetches the complete EPG data stream."""
+    lines = []
+    try:
+        # Open TCP socket connection to VDR SVDRP port
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(SVDRP_TIMEOUT)
+        s.connect((VDR_IP, SVDRP_PORT))
+        
+        # Read the initial welcome message from VDR (e.g., 220 ...)
+        initial_resp = s.recv(4096).decode('utf-8', errors='ignore')
+        
+        # Send LSTE command to request all EPG entries
+        s.sendall(b"LSTE\r\n")
+        
+        buffer = ""
+        while True:
+            chunk = s.recv(65536).decode('utf-8', errors='ignore')
+            if not chunk:
+                break
+            buffer += chunk
+            
+            # Process lines on-the-fly from buffer
+            while "\n" in buffer:
+                line, buffer = buffer.split("\n", 1)
+                line = line.strip()
+                if not line:
+                    continue
+                
+                # SVDRP codes response status mapping:
+                # Response line formats: "215-Content" or "215 Content"
+                if line.startswith("215"):
+                    # Strip the numeric response prefix (e.g., '215-' or '215 ')
+                    vdr_line = line[4:]
+                    lines.append(vdr_line)
+                elif line.startswith("250"):
+                    # 250 signals successful command termination
+                    break
+                elif line.strip() and line.split()[0].isdigit() and int(line.split()[0]) >= 400:
+                    # Error codes (4xx/5xx) from SVDRP
+                    print(f"[!] SVDRP returned error: {line}", file=sys.stderr)
+                    return []
+                    
+        # Safely close connection using QUIT command
+        s.sendall(b"QUIT\r\n")
+        s.close()
+    except Exception as e:
+        print(f"[!] SVDRP connection failed to {VDR_IP}:{SVDRP_PORT}: {e}", file=sys.stderr)
+        return []
+    return lines
+
+def parse_epg_data():
+    """Converts the VDR EPG contents (from file or SVDRP) into standard XMLTV format."""
+    channel_map = fetch_streamdev_channels()
+    epg_source_lines = []
+
+    # Choose EPG ingest engine based on your config file
+    if EPG_MODE == "svdrp":
+        print("[-] Fetching EPG data via SVDRP network interface...")
+        epg_source_lines = fetch_epg_via_svdrp()
+    else:
+        print(f"[-] Reading EPG data from local file path: {EPG_DATA_PATH}")
+        if os.path.exists(EPG_DATA_PATH):
+            with open(EPG_DATA_PATH, "r", encoding="utf-8", errors="ignore") as f:
+                epg_source_lines = [line.strip() for line in f]
+
+    # Process additional channel names discovered inside the EPG data stream
+    for line in epg_source_lines:
+        if line.startswith("C "):
+            parts = line.split(" ", 2)
+            if len(parts) >= 2:
+                raw_id = parts[1].strip()
+                if raw_id not in channel_map and len(parts) > 2:
+                    channel_map[raw_id] = parts[2].strip()
+
+    xml = ['<?xml version="1.0" encoding="utf-8" ?>']
+    xml.append('<tv generator-info-name="VDR-EPG-Converter">')
+    
+    for raw_id, ch_name in channel_map.items():
+        clean_id = sanitize_id(raw_id)
+        xml.append(f'  <channel id="{clean_id}">')
+        xml.append(f'    <display-name>{clean_xml_string(ch_name)}</display-name>')
+        xml.append('  </channel>')
+        
+    inside_event = False
+    current_channel = None
+    
+    for line in epg_source_lines:
+        if not line:
+            continue
+        
+        parts = line.split(" ", 1)
+        tag = parts[0].strip()
+        content = parts[1].strip() if len(parts) > 1 else ""
+        
+        if tag == "C":
+            c_parts = content.split(" ", 1)
+            current_channel = c_parts[0].strip()
+        elif tag == "E" and current_channel:
+            inside_event = True
+            e_parts = content.split(" ")
+            if len(e_parts) >= 3:
+                try:
+                    start_ts = int(e_parts[1])
+                    duration = int(e_parts[2])
+                    end_ts = start_ts + duration
+                    
+                    start_str = datetime.fromtimestamp(start_ts).strftime('%Y%m%d%H%M%S +0100')
+                    end_str = datetime.fromtimestamp(end_ts).strftime('%Y%m%d%H%M%S +0100')
+                    
+                    clean_ch_id = sanitize_id(current_channel)
+                    xml.append(f'  <programme start="{start_str}" stop="{end_str}" channel="{clean_ch_id}">')
+                except (ValueError, IndexError):
+                    inside_event = False
+                    continue
+        elif tag == "T" and inside_event:
+            xml.append(f'    <title lang="de">{clean_xml_string(content)}</title>')
+        elif tag == "D" and inside_event:
+            xml.append(f'    <desc lang="de">{clean_xml_string(content)}</desc>')
+        elif tag == "e":
+            if inside_event:
+                xml.append('  </programme>')
+                inside_event = False
+                
+    xml.append('</tv>')
+    return "\n".join(xml)
+
+def old_parse_epg_data():
+    channel_map = fetch_streamdev_channels()
+    if os.path.exists(EPG_DATA_PATH):
+        with open(EPG_DATA_PATH, "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("C "):
+                    parts = line.split(" ", 2)
+                    if len(parts) >= 2:
+                        raw_id = parts[1].strip()
+                        if raw_id not in channel_map and len(parts) > 2:
+                            channel_map[raw_id] = parts[2].strip()
+
+    xml = ['<?xml version="1.0" encoding="utf-8" ?>']
+    xml.append('<tv generator-info-name="VDR-EPG-Converter">')
+    for raw_id, ch_name in channel_map.items():
+        clean_id = sanitize_id(raw_id)
+        xml.append(f'  <channel id="{clean_id}">')
+        xml.append(f'    <display-name>{clean_xml_string(ch_name)}</display-name>')
+        xml.append('  </channel>')
+        
+    if os.path.exists(EPG_DATA_PATH):
+        inside_event = False
+        current_channel = None
+        with open(EPG_DATA_PATH, "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                parts = line.split(" ", 1)
+                tag = parts[0]
+                content = parts[1].strip() if len(parts) > 1 else ""
+                if tag == "C":
+                    c_parts = content.split(" ", 1)
+                    current_channel = c_parts[0].strip()
+                elif tag == "E" and current_channel:
+                    inside_event = True
+                    e_parts = content.split(" ")
+                    if len(e_parts) >= 3:
+                        try:
+                            start_ts = int(e_parts[1])
+                            duration = int(e_parts[2])
+                            end_ts = start_ts + duration
+
+                            start_str = datetime.fromtimestamp(start_ts).strftime('%Y%m%d%H%M%S +0100')
+                            end_str = datetime.fromtimestamp(end_ts).strftime('%Y%m%d%H%M%S +0100')
+                            
+                            clean_ch_id = sanitize_id(current_channel)
+                            xml.append(f'  <programme start="{start_str}" stop="{end_str}" channel="{clean_ch_id}">')
+                        except (ValueError, IndexError):
+                            inside_event = False
+                            continue
+                elif tag == "T" and inside_event:
+                    xml.append(f'    <title lang="de">{clean_xml_string(content)}</title>')
+                elif tag == "D" and inside_event:
+                    xml.append(f'    <desc lang="de">{clean_xml_string(content)}</desc>')
+                elif tag == "e":
+                    if inside_event:
+                        xml.append('  </programme>')
+                        inside_event = False
+    xml.append('</tv>')
+    return "\n".join(xml)
+
+def modify_m3u_channels(original_m3u):
+    lines = original_m3u.splitlines()
+    new_m3u = ["#EXTM3U"]
+    current_extinf = None
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#EXTM3U"):
+            continue
+        if line.startswith("#EXTINF"):
+            current_extinf = line
+        elif line.startswith("http"):
+            match = re.search(r'/([^/]+)$', line)
+            if match and current_extinf:
+                raw_channel_id = match.group(1)
+                clean_channel_id = sanitize_id(raw_channel_id)
+                parts = current_extinf.split(",", 1)
+                if len(parts) == 2:
+                    meta, name = parts[0], parts[1]
+                    current_extinf = f'{meta} tvg-id="{clean_channel_id}" tvg-name="{name}",{name}'
+            if current_extinf:
+                new_m3u.append(current_extinf)
+                current_extinf = None
+            if match:
+                new_m3u.append(f"{VDR_BASE_URL}/TS/{match.group(1)}")
+            else:
+                new_m3u.append(line)
+    return "\n".join(new_m3u)
+
+class VDRProxyHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/channels.m3u":
+            try:
+                vdr_url = f"{VDR_BASE_URL}/channels.m3u"
+                req = urllib.request.Request(vdr_url, headers={'User-Agent': 'Jellyfin'})
+                with urllib.request.urlopen(req) as response:
+                    m3u_content = response.read().decode('utf-8', errors='ignore')
+                modified_m3u = modify_m3u_channels(m3u_content)
+                self.send_response(200)
+                self.send_header('Content-Type', 'audio/x-mpegurl; charset=utf-8')
+                self.end_headers()
+                self.wfile.write(modified_m3u.encode('utf-8'))
+            except Exception as e:
+                self.send_error(500, f"M3U Error: {e}")
+        elif self.path == "/epg.xml":
+            try:
+                epg_xml = parse_epg_data()
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/xml; charset=utf-8')
+                self.end_headers()
+                self.wfile.write(epg_xml.encode('utf-8'))
+            except Exception as e:
+                self.send_error(500, f"EPG Error: {e}")
+        else:
+            self.send_error(404)
+
+def run():
+    print(f"[-] Configuration file: {args.config}")
+    print(f"[-] Target VDR Backend: {VDR_BASE_URL}")
+    print(f"[-] Target EPG File path: {EPG_DATA_PATH}")
+    server_address = (LISTEN_IP, LISTEN_PORT)
+    httpd = HTTPServer(server_address, VDRProxyHandler)
+    if PROXY_PROTOCOL == "https":
+        if not SSL_CERT_FILE or not SSL_KEY_FILE:
+            print("[!] Error: HTTPS encryption enabled, but ssl_cert_file or ssl_key_file is not specified inside config!", file=sys.stderr)
+            sys.exit(1)
+        if not os.path.exists(SSL_CERT_FILE) or not os.path.exists(SSL_KEY_FILE):
+            print(f"[!] Error: Certificate file ({SSL_CERT_FILE}) or Key file ({SSL_KEY_FILE}) not found!", file=sys.stderr)
+            sys.exit(1)
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(certfile=SSL_CERT_FILE, keyfile=SSL_KEY_FILE)
+        httpd.socket = context.wrap_socket(httpd.socket, server_side=True)
+        print(f"[+] Jellyfin VDR Proxy secure web server successfully running on https://{LISTEN_IP}:{LISTEN_PORT}...")
+    else:
+        print(f"[+] Jellyfin VDR Proxy web server successfully running on http://{LISTEN_IP}:{LISTEN_PORT}...")
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        print("\n[*] Shutting down proxy server safely.")
+
+if __name__ == '__main__':
+    run()

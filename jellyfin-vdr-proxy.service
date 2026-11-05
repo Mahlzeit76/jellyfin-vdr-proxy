@@ -1,0 +1,13 @@
+[Unit]
+Description=Jellyfin VDR Streamdev and XMLTV EPG Proxy Service
+After=network.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/jellyfin-vdr-proxy
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
