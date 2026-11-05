@@ -1,11 +1,10 @@
 # Jellyfin VDR Streamdev & XMLTV Proxy
 
-An automated, standalone Python 3 networking environment designed to map standard IPTV interfaces on a Jellyfin media framework directly onto a VDR (Video Disk Recorder) backend running `streamdev-server`.
+A standalone server designed to map standard IPTV interfaces on a Jellyfin media framework directly onto a VDR (Video Disk Recorder) backend running `streamdev-server`.
 
 ## Features
- **Online VDR EPG to XMLTV conversion** On the fly conversion of epg.data to XMLTV structure perfectly usable in Jellyfin's Live-TV EPG provider
+- **Online VDR EPG to XMLTV conversion** On the fly conversion of epg.data to XMLTV structure perfectly usable in Jellyfin's Live-TV EPG provider
 - **Playlist creation from VDR channels** Providing a m3u file to use in Jellyfin's Live-TV m3u tuner or directly with e.g. VLC.
-- **SSL / TLS Integration:** Native secure listener layer configurable right inside the core configuration file.
 
 ## Quickstart Deployment
 
