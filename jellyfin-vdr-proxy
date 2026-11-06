@@ -135,33 +135,27 @@ def fetch_epg_via_svdrp():
                     continue
                 
                 # SVDRP codes response status mapping:
-                # Response line formats: "215-Content" or "215 Content"
-                if line.startswith("215 End of EPG data"):
+                # If line ends with "End of EPG data", close connection and return received lines
+                elif line.endswith("End of EPG data"):
                     # Safely close connection using QUIT command
                     s.sendall(b"QUIT\r\n")
                     s.close()
                     return lines
+                # If line begins with 215, cut status code from line and append to lines
                 elif line.startswith("215"):
                     # Strip the numeric response prefix (e.g., '215-' or '215 ')
                     vdr_line = line[4:]
-                    print(f"[{counter}] {line}")
-                    counter += 1
                     lines.append(vdr_line)
-                elif line.startswith("250"):
-                    # 250 signals successful command termination
-                    break
+                    print(f"[] {line}")
+                # if line begins with 4xx or 5xx status code, print error and return empty lines
                 elif line.strip() and line.split()[0].isdigit() and int(line.split()[0]) >= 400:
                     # Error codes (4xx/5xx) from SVDRP
                     print(f"[!] SVDRP returned error: {line}", file=sys.stderr)
                     return []
-                   
-        # Safely close connection using QUIT command
-        s.sendall(b"QUIT\r\n")
-        s.close()
+ 
     except Exception as e:
         print(f"[!] SVDRP connection failed to {VDR_IP}:{SVDRP_PORT}: {e}", file=sys.stderr)
         return []
-    return lines
 
 def parse_epg_data():
     """Converts the VDR EPG contents (from file or SVDRP) into standard XMLTV format."""
