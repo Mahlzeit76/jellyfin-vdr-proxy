@@ -4,10 +4,10 @@
 set -e
 
 # System requirements and path validation
-BINARY_TARGET="/usr/bin/jellyfin-vdr-proxy"
-CONFIG_DIR="/etc/jellyfin-vdr-proxy"
+BINARY_TARGET="/usr/bin/vdr-proxy"
+CONFIG_DIR="/etc/vdr-proxy"
 CONFIG_FILE="${CONFIG_DIR}/config.ini"
-SERVICE_FILE="/etc/systemd/system/jellyfin-vdr-proxy.service"
+SERVICE_FILE="/etc/systemd/system/vdr-proxy.service"
 
 check_prerequisites() {
     echo "[*] Validation: Checking system environment and runtime dependencies..."
@@ -32,7 +32,7 @@ check_prerequisites() {
 install_proxy() {
     check_prerequisites
     echo "[*] Step 1: Deploying primary binary payload..."
-    cp jellyfin-vdr-proxy "${BINARY_TARGET}"
+    cp vdr-proxy "${BINARY_TARGET}"
     chmod +x "${BINARY_TARGET}"
     echo "[+] Binary successfully linked to: ${BINARY_TARGET}"
 
@@ -49,15 +49,15 @@ install_proxy() {
     fi
 
     echo "[*] Step 3: Registering asynchronous systemd background management service layer..."
-    cp jellyfin-vdr-proxy.service "${SERVICE_FILE}"
+    cp vdr-proxy.service "${SERVICE_FILE}"
     
     systemctl daemon-reload
-    systemctl enable jellyfin-vdr-proxy.service
-    systemctl restart jellyfin-vdr-proxy.service
+    systemctl enable vdr-proxy.service
+    systemctl restart vdr-proxy.service
     
     echo "========================================================================"
     echo "[+] Deployment Success! VDR Proxy is successfully mounted and running."
-    echo "    - Target Management Layer: systemctl status jellyfin-vdr-proxy.service"
+    echo "    - Target Management Layer: systemctl status vdr-proxy.service"
     echo "    - Main Config Target:      ${CONFIG_FILE}"
     echo "========================================================================"
 }
@@ -70,13 +70,13 @@ uninstall_proxy() {
 
     echo "[*] Commencing rollback: Purging VDR proxy suite components..."
 
-    if systemctl is-active --quiet jellyfin-vdr-proxy.service &>/dev/null; then
+    if systemctl is-active --quiet vdr-proxy.service &>/dev/null; then
         echo "[*] Disengaging background processing and active service execution loops..."
-        systemctl stop jellyfin-vdr-proxy.service || true
+        systemctl stop vdr-proxy.service || true
     fi
 
     if [ -f "${SERVICE_FILE}" ]; then
-        systemctl disable jellyfin-vdr-proxy.service || true
+        systemctl disable vdr-proxy.service || true
         rm -f "${SERVICE_FILE}"
         systemctl daemon-reload
         echo "[+] Core service engine links deleted."
