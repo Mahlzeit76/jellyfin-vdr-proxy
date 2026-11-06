@@ -36,12 +36,12 @@ sudo ./install.sh --uninstall
 | Parameter | Value |
 | :--- | :--- |
 | vdr_protocol | "http" or "https", depending on your VDR setup. Default "http" |
-| vdr_ip | IP of VDR to use as streaming server and EPG source. Must be reachable from streaming client. |  
+| vdr_ip | IP of VDR to use as streaming server and EPG source. Must be accessible from streaming client. |  
 | streamdev_port | streamdev-server port. Default "3000" |
 | epg_mode | "file" (to use epg.data) or "svdrp" (to directly use VDR LSTE command). Default svdrp |
-| epg_data_path | Path to epg.data. Default "/var/lib/vdr/epg.data" |
-| svdrp_port | SVDRP Port. Default "6419" |
-| svdrp_timeout | Timeout for SVDRP connection. Default "30" |
+| epg_data_path | Path to "epg.data" if "epg_mode=file". Default "/var/lib/vdr/epg.data" |
+| svdrp_port | SVDRP Port if "epg_mode=svdrp". Default "6419" |
+| svdrp_timeout | Timeout for SVDRP connection if "epg_mode=svdrp". Default "30" |
 
 ### Section [PROXY]
 
@@ -50,5 +50,5 @@ sudo ./install.sh --uninstall
 | listen_ip | Proxy listen IP. Default "0.0.0.0" |
 | proxy_protocol | http or https. Default "http" |
 | listen_port | Proxy listen port. Default "8080" |
-| ssl_cert_file | Path to SSL certificate file. For https only |
-| ssl_key_file | Path to SSL key file. For https only |
+| ssl_cert_file | Path to SSL certificate file. For https only - UNTESTED |
+| ssl_key_file | Path to SSL key file. For https only - UNTESTED |
