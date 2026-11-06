@@ -36,7 +36,7 @@ sudo ./install.sh --uninstall
 | Parameter | Value |
 | :--- | :--- |
 | vdr_protocol | "http" or "https", depending on your VDR setup. Default "http" |
-| vdr_ip | IP of VDR to use as streaming server and EPG source |  
+| vdr_ip | IP of VDR to use as streaming server and EPG source. Must be reachable from streaming client. |  
 | streamdev_port | streamdev-server port. Default "3000" |
 | epg_mode | "file" (to use epg.data) or "svdrp" (to directly use VDR LSTE command). Default svdrp |
 | epg_data_path | Path to epg.data. Default "/var/lib/vdr/epg.data" |
