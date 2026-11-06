@@ -27,7 +27,9 @@ def load_config(config_path):
             "vdr_protocol": "http",
             "vdr_ip": "127.0.0.1",
             "streamdev_port": "3000",
-            "epg_data_path": "/var/lib/vdr/epg.data"
+            "epg_mode": "svdrp",
+            "svdrp_port": "6419",
+            "svdrp_timeout": "30"
         }
         config["PROXY"] = {
             "proxy_protocol": "http",
@@ -51,16 +53,16 @@ args = parser.parse_args()
 
 config = load_config(args.config)
 VDR_PROTOCOL = config.get("VDR", "vdr_protocol", fallback="http").strip().lower().replace("://", "")
-VDR_IP = config.get("VDR", "vdr_ip")
-STREAMDEV_PORT = config.getint("VDR", "streamdev_port")
+VDR_IP = config.get("VDR", "vdr_ip", fallback="127.0.0.1")
+STREAMDEV_PORT = config.getint("VDR", "streamdev_port", fallback=3000)
 EPG_DATA_PATH = config.get("VDR", "epg_data_path")
-EPG_MODE = config.get("VDR", "epg_mode", fallback="file").strip().lower()
+EPG_MODE = config.get("VDR", "epg_mode", fallback="svdrp").strip().lower()
 SVDRP_PORT = config.getint("VDR", "svdrp_port", fallback=6419)
 SVDRP_TIMEOUT = config.getint("VDR", "svdrp_timeout", fallback=30)
 
 PROXY_PROTOCOL = config.get("PROXY", "proxy_protocol", fallback="http").strip().lower()
 LISTEN_IP = config.get("PROXY", "listen_ip", fallback="0.0.0.0")
-LISTEN_PORT = config.getint("PROXY", "listen_port")
+LISTEN_PORT = config.getint("PROXY", "listen_port", fallback=8080)
 SSL_CERT_FILE = config.get("PROXY", "ssl_cert_file", fallback="")
 SSL_KEY_FILE = config.get("PROXY", "ssl_key_file", fallback="")
 
@@ -117,6 +119,7 @@ def fetch_epg_via_svdrp():
         # Send LSTE command to request all EPG entries
         s.sendall(b"LSTE\r\n")
         
+        counter = 0
         buffer = ""
         while True:
             chunk = s.recv(65536).decode('utf-8', errors='ignore')
@@ -133,9 +136,16 @@ def fetch_epg_via_svdrp():
                 
                 # SVDRP codes response status mapping:
                 # Response line formats: "215-Content" or "215 Content"
-                if line.startswith("215"):
+                if line.startswith("215 End of EPG data"):
+                    # Safely close connection using QUIT command
+                    s.sendall(b"QUIT\r\n")
+                    s.close()
+                    return lines
+                elif line.startswith("215"):
                     # Strip the numeric response prefix (e.g., '215-' or '215 ')
                     vdr_line = line[4:]
+                    print(f"[{counter}] {line}")
+                    counter += 1
                     lines.append(vdr_line)
                 elif line.startswith("250"):
                     # 250 signals successful command termination
@@ -144,7 +154,7 @@ def fetch_epg_via_svdrp():
                     # Error codes (4xx/5xx) from SVDRP
                     print(f"[!] SVDRP returned error: {line}", file=sys.stderr)
                     return []
-                    
+                   
         # Safely close connection using QUIT command
         s.sendall(b"QUIT\r\n")
         s.close()
@@ -178,7 +188,7 @@ def parse_epg_data():
                     channel_map[raw_id] = parts[2].strip()
 
     xml = ['<?xml version="1.0" encoding="utf-8" ?>']
-    xml.append('<tv generator-info-name="VDR-EPG-Converter">')
+    xml.append('<tv generator-info-name="jellyfin-vdr-proxy">')
     
     for raw_id, ch_name in channel_map.items():
         clean_id = sanitize_id(raw_id)
